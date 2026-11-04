@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qui a dit quoi</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;margin:0 auto;padding:16px;background:#f7f5ff;color:#222}
+  h1{font-size:1.6rem;text-align:center}
+  .card{background:#fff;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  input,textarea,select{width:100%;box-sizing:border-box;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:8px;margin:4px 0}
+  textarea{min-height:60px}
+  button{padding:12px 18px;font-size:1rem;border:0;border-radius:8px;background:#6c4cf1;color:#fff;cursor:pointer;margin:6px 0;width:100%}
+  button.secondary{background:#999}
+  .code{font-size:2rem;letter-spacing:.3em;text-align:center;font-weight:bold;color:#6c4cf1}
+  .muted{color:#777;font-size:.9rem}
+  .answer{padding:8px;border-left:4px solid #6c4cf1;background:#faf9ff;margin:6px 0;border-radius:6px}
+  table{width:100%;border-collapse:collapse}
+  td,th{padding:6px;border-bottom:1px solid #eee;text-align:left}
+  .choice label{display:block;padding:6px 0}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+// ---------------------------------------------------------------
+// CONFIGURATION : remplacez ces valeurs par celles de votre projet Firebase
+// ---------------------------------------------------------------
+const FIREBASE_CONFIG = {
+  apiKey: "A_REMPLACER",
+  authDomain: "A_REMPLACER",
+  databaseURL: "https://A_REMPLACER.firebaseio.com",
+  projectId: "A_REMPLACER"
+};
+firebase.initializeApp(FIREBASE_CONFIG);
+const db = firebase.database();
+
+// ---------------------------------------------------------------
+// Banque de questions. "options" = question à dilemme (choix fermé).
+// ---------------------------------------------------------------
+const BANK = [
+  {text: "Quel est ton film préféré ?"},
+  {text: "Quel sport est le plus nul selon toi ?"},
+  {text: "Raconte ta pire honte."},
+  {text: "Quel est ton plus mauvais souvenir de vacances ?"},
+  {text: "Quel est le plus gros mensonge que tu as dit ?"},
+  {text: "Quelle est ta manie la plus bizarre ?"},
+  {text: "Quel super-pouvoir choisirais-tu ?"},
+  {text: "Quelle est ta chanson guilty pleasure ?"},
+  {text: "Quel est le cadeau le plus nul que tu aies reçu ?"},
+  {text: "Quel est ton plus grand regret ?"},
+  {text: "Quelle série regarderais-tu en boucle ?"},
+  {text: "Quel est ton tic de langage ?"},
+  {text: "Quel est le meilleur plat du monde selon toi ?"},
+  {text: "Plutôt pizza ou sushi ?", options: ["Pizza", "Sushi"]},
+  {text: "Plutôt montagne ou mer ?", options: ["Montagne", "Mer"]},
+  {text: "Plutôt rester chez soi ou sortir toute la nuit ?", options: ["Rester chez soi", "Sortir"]},
+  {text: "Plutôt voyager seul ou en groupe ?", options: ["Seul", "En groupe"]}
+];
+
+// ---------------------------------------------------------------
+// État local
+// ---------------------------------------------------------------
+const me = {
+  id: sessionStorage.getItem('pid') || (() => {
+    const id = Math.random().toString(36).slice(2, 10);
+    sessionStorage.setItem('pid', id);
+    return id;
+  })(),
+  name: sessionStorage.getItem('name') || ''
+};
+let roomCode = sessionStorage.getItem('code') || null;
+let roomRef = null;
+let room = null;
+const drafts = {}; // garde ce que chacun a déjà saisi pendant les mises à jour
+
+// ---------------------------------------------------------------
+// Utilitaires
+// ---------------------------------------------------------------
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function genCode() {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  let c = '';
+  for (let i = 0; i < 4; i++) c += letters[Math.floor(Math.random() * letters.length)];
+  return c;
+}
+
+function playerIds() { return Object.keys(room?.players || {}); }
+function nameOf(id) { return room?.players?.[id]?.name || '?'; }
+function isHost() { return room && room.host === me.id; }
+
+// ---------------------------------------------------------------
+// Connexion à une salle
+// ---------------------------------------------------------------
+function listen(code) {
+  if (roomRef) roomRef.off();
+  roomCode = code;
+  sessionStorage.setItem('code', code);
+  roomRef = db.ref('rooms/' + code);
+  roomRef.on('value', snap => {
+    room = snap.val();
+    if (!room) { leave(); return; }
+    render();
+  });
+}
+
+function leave() {
+  if (roomRef) roomRef.off();
+  roomRef = null; room = null; roomCode = null;
+  sessionStorage.removeItem('code');
+  render();
+}
+
+async function createRoom() {
+  const name = document.getElementById('name').value.trim();
+  if (!name) return alert('Entre ton prénom.');
+  me.name = name; sessionStorage.setItem('name', name);
+  const code = genCode();
+  await db.ref('rooms/' + code).set({
+    host: me.id, phase: 'lobby', count: 5,
+    players: {[me.id]: {name}}, createdAt: Date.now()
+  });
+  listen(code);
+}
+
+async function joinRoom() {
+  const name = document.getElementById('name').value.trim();
+  const code = document.getElementById('code').value.trim().toUpperCase();
+  if (!name) return alert('Entre ton prénom.');
+  if (code.length !== 4) return alert('Le code fait 4 lettres.');
+  const snap = await db.ref('rooms/' + code).once('value');
+  if (!snap.exists()) return alert('Salle introuvable.');
+  const r = snap.val();
+  if (r.phase !== 'lobby') return alert('La partie a déjà commencé.');
+  if (Object.keys(r.players || {}).length >= 12) return alert('Salle pleine (12 joueurs max).');
+  me.name = name; sessionStorage.setItem('name', name);
+  await db.ref(`rooms/${code}/players/${me.id}`).set({name});
+  listen(code);
+}
+
+// ---------------------------------------------------------------
+// Actions de l'hôte
+// ---------------------------------------------------------------
+async function startGame() {
+  const ids = playerIds();
+  if (ids.length < 4) return alert('Il faut au moins 4 joueurs.');
+  const n = parseInt(document.getElementById('count').value, 10) || 5;
+  const count = Math.min(Math.max(n, 3), BANK.length);
+  const questions = shuffle(BANK).slice(0, count);
+  await roomRef.update({phase: 'answer', count, questions, answers: null, links: null, order: null});
+}
+
+async function startLink() {
+  const ids = playerIds();
+  const order = room.questions.map(() => shuffle(ids));
+  await roomRef.update({phase: 'link', order});
+}
+
+async function reveal() { await roomRef.update({phase: 'reveal'}); }
+
+async function replay() {
+  await roomRef.update({phase: 'lobby', questions: null, answers: null, links: null, order: null});
+}
+
+// ---------------------------------------------------------------
+// Actions des joueurs
+// ---------------------------------------------------------------
+async function submitAnswers() {
+  const arr = room.questions.map((q, i) => {
+    if (q.options) {
+      const sel = document.querySelector(`input[name="r${i}"]:checked`);
+      return sel ? sel.value : '';
+    }
+    return (document.getElementById('a' + i)?.value || '').trim();
+  });
+  if (arr.some(a => !a)) return alert('Réponds à toutes les questions.');
+  await roomRef.child('answers/' + me.id).set(arr);
+}
+
+async function submitLinks() {
+  const links = room.questions.map((_, q) =>
+    room.order[q].map((_, k) => document.getElementById(`l${q}_${k}`).value));
+  if (links.some(row => row.some(v => !v))) return alert('Relie toutes les réponses.');
+  await roomRef.child('links/' + me.id).set(links);
+}
+
+// ---------------------------------------------------------------
+// Calcul des points
+// +1 par bonne association (sauf relier sa propre réponse : 0 point)
+// +2 de bonus si toutes les réponses d'une question sont bien reliées
+// ---------------------------------------------------------------
+function computeScores() {
+  const ids = playerIds();
+  const scores = {};
+  ids.forEach(p => scores[p] = {pts: 0, bonus: 0});
+  room.questions.forEach((_, q) => {
+    ids.forEach(p => {
+      const guesses = room.links?.[p]?.[q] || [];
+      let allOk = true;
+      room.order[q].forEach((author, k) => {
+        const ok = guesses[k] === author;
+        if (!ok) allOk = false;
+        if (ok && author !== p) scores[p].pts += 1;
+      });
+      if (allOk) scores[p].bonus += 2;
+    });
+  });
+  return scores;
+}
+
+// ---------------------------------------------------------------
+// Rendu
+// ---------------------------------------------------------------
+function saveDrafts() {
+  document.querySelectorAll('textarea, select').forEach(el => { if (el.id) drafts[el.id] = el.value; });
+  document.querySelectorAll('input[type=radio]:checked').forEach(el => { drafts[el.name] = el.value; });
+}
+
+function restoreDrafts() {
+  Object.entries(drafts).forEach(([key, value]) => {
+    const el = document.getElementById(key);
+    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) el.value = value;
+    const radio = document.querySelector(`input[name="${key}"][value="${CSS.escape(value)}"]`);
+    if (radio) radio.checked = true;
+  });
+}
+
+document.addEventListener('input', e => { if (e.target.id) drafts[e.target.id] = e.target.value; });
+document.addEventListener('change', e => {
+  if (e.target.type === 'radio') drafts[e.target.name] = e.target.value;
+  else if (e.target.id) drafts[e.target.id] = e.target.value;
+});
+
+function render() {
+  saveDrafts();
+  const app = document.getElementById('app');
+  if (!room) { app.innerHTML = renderHome(); }
+  else if (room.phase === 'lobby') app.innerHTML = renderLobby();
+  else if (room.phase === 'answer') app.innerHTML = renderAnswer();
+  else if (room.phase === 'link') app.innerHTML = renderLink();
+  else if (room.phase === 'reveal') app.innerHTML = renderReveal();
+  restoreDrafts();
+}
+
+function renderHome() {
+  return `
+    <h1>Qui a dit quoi ?</h1>
+    <div class="card">
+      <input id="name" placeholder="Ton prénom" value="${esc(me.name)}">
+      <button onclick="createRoom()">Créer une salle</button>
+    </div>
+    <div class="card">
+      <input id="code" placeholder="Code de la salle (4 lettres)" maxlength="4">
+      <button onclick="joinRoom()">Rejoindre</button>
+    </div>`;
+}
+
+function renderLobby() {
+  const ids = playerIds();
+  const list = ids.map(id => `<li>${esc(nameOf(id))}${id === room.host ? ' (hôte)' : ''}</li>`).join('');
+  const hostPart = isHost() ? `
+    <label>Nombre de questions (3 à ${BANK.length})</label>
+    <input id="count" type="number" min="3" max="${BANK.length}" value="${room.count || 5}">
+    <button onclick="startGame()">Lancer la partie (${ids.length} joueur${ids.length > 1 ? 's' : ''})</button>
+    ${ids.length < 4 ? '<p class="muted">Il faut au moins 4 joueurs.</p>' : ''}`
+    : '<p class="muted">En attente que l\'hôte lance la partie…</p>';
+  return `
+    <h1>Salle</h1>
+    <div class="card"><p class="muted">Code à partager :</p><div class="code">${esc(roomCode)}</div></div>
+    <div class="card"><ul>${list}</ul>${hostPart}</div>`;
+}
+
+function renderAnswer() {
+  const ids = playerIds();
+  const answered = Object.keys(room.answers || {});
+  const done = answered.includes(me.id);
+  if (done) {
+    return `<h1>Phase 1 : réponses</h1>
+      <div class="card"><p>Tes réponses sont envoyées. En attente des autres…</p>
+      <p class="muted">${answered.length}/${ids.length} ont répondu</p></div>
+      ${isHost() && answered.length === ids.length ? '<button onclick="startLink()">Passer à la liaison</button>' : ''}`;
+  }
+  const form = room.questions.map((q, i) => {
+    if (q.options) {
+      const radios = q.options.map(o =>
+        `<label><input type="radio" name="r${i}" value="${esc(o)}"> ${esc(o)}</label>`).join('');
+      return `<div class="card"><b>${esc(q.text)}</b><div class="choice">${radios}</div></div>`;
+    }
+    return `<div class="card"><b>${esc(q.text)}</b><textarea id="a${i}" placeholder="Ta réponse"></textarea></div>`;
+  }).join('');
+  return `<h1>Phase 1 : réponses</h1>${form}
+    <button onclick="submitAnswers()">Envoyer mes réponses</button>`;
+}
+
+function renderLink() {
+  const ids = playerIds();
+  const linked = Object.keys(room.links || {});
+  if (linked.includes(me.id)) {
+    return `<h1>Phase 2 : liaison</h1>
+      <div class="card"><p>Tes choix sont envoyés. En attente des autres…</p>
+      <p class="muted">${linked.length}/${ids.length} ont voté</p></div>
+      ${isHost() && linked.length === ids.length ? '<button onclick="reveal()">Révéler les scores</button>' : ''}`;
+  }
+  const options = ids.map(id => `<option value="${esc(id)}">${esc(nameOf(id))}</option>`).join('');
+  const blocks = room.questions.map((q, qi) => {
+    const rows = room.order[qi].map((author, k) => {
+      const answer = room.answers[author][qi];
+      return `<div class="answer">${esc(answer)}
+        <select id="l${qi}_${k}"><option value="">— qui a écrit ça ? —</option>${options}</select></div>`;
+    }).join('');
+    return `<div class="card"><b>${esc(q.text)}</b>${rows}</div>`;
+  }).join('');
+  return `<h1>Phase 2 : liaison</h1>
+    <p class="muted">Relie chaque réponse à son auteur. Les réponses sont anonymes.</p>
+    ${blocks}
+    <button onclick="submitLinks()">Envoyer mes liens</button>`;
+}
+
+function renderReveal() {
+  const ids = playerIds();
+  const scores = computeScores();
+  const rows = ids
+    .map(id => ({id, ...scores[id], total: scores[id].pts + scores[id].bonus}))
+    .sort((a, b) => b.total - a.total)
+    .map(r => `<tr><td>${esc(nameOf(r.id))}</td><td>${r.pts}</td><td>${r.bonus}</td><td><b>${r.total}</b></td></tr>`)
+    .join('');
+  const details = room.questions.map((q, qi) => {
+    const items = room.order[qi].map(author =>
+      `<div class="answer">${esc(room.answers[author][qi])} <span class="muted">— ${esc(nameOf(author))}</span></div>`).join('');
+    return `<div class="card"><b>${esc(q.text)}</b>${items}</div>`;
+  }).join('');
+  return `<h1>Résultats</h1>
+    <div class="card"><table>
+      <tr><th>Joueur</th><th>Points</th><th>Bonus</th><th>Total</th></tr>${rows}
+    </table></div>
+    ${details}
+    ${isHost() ? '<button onclick="replay()">Rejouer dans cette salle</button>' : ''}
+    <button class="secondary" onclick="leave()">Quitter</button>`;
+}
+
+// Reprise de session après rafraîchissement
+if (roomCode) listen(roomCode); else render();
+</script>
+</body>
+</html>
