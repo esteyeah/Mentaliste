@@ -7,17 +7,25 @@
 <style>
   body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;margin:0 auto;padding:16px;background:#f7f5ff;color:#222}
   h1{font-size:1.6rem;text-align:center}
+  h2{font-size:1.2rem;margin:12px 0 4px}
   .card{background:#fff;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-  input,textarea,select{width:100%;box-sizing:border-box;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:8px;margin:4px 0}
-  textarea{min-height:60px}
+  input,textarea{width:100%;box-sizing:border-box;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:8px;margin:4px 0}
+  textarea{min-height:70px}
   button{padding:12px 18px;font-size:1rem;border:0;border-radius:8px;background:#6c4cf1;color:#fff;cursor:pointer;margin:6px 0;width:100%}
+  button:disabled{background:#bbb;cursor:not-allowed}
   button.secondary{background:#999}
   .code{font-size:2rem;letter-spacing:.3em;text-align:center;font-weight:bold;color:#6c4cf1}
   .muted{color:#777;font-size:.9rem}
-  .answer{padding:8px;border-left:4px solid #6c4cf1;background:#faf9ff;margin:6px 0;border-radius:6px}
+  .timer{font-size:2rem;font-weight:bold;text-align:center;color:#6c4cf1;margin:4px 0}
+  .answer{padding:10px;border-left:4px solid #6c4cf1;background:#faf9ff;margin:6px 0;border-radius:6px}
+  .answer.big{font-size:1.2rem;padding:16px;margin:12px 0}
+  .picks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .picks button{margin:0}
+  .notice{background:#fff3cd;color:#664d03}
   table{width:100%;border-collapse:collapse}
   td,th{padding:6px;border-bottom:1px solid #eee;text-align:left}
-  .choice label{display:block;padding:6px 0}
+  .choice{display:block;padding:6px 0}
+  .choice input{width:auto;margin-right:6px}
 </style>
 </head>
 <body>
@@ -27,7 +35,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script>
 // ---------------------------------------------------------------
-// CONFIGURATION : remplacez ces valeurs par celles de votre projet Firebase
+// Configuration Firebase (projet kiadi-e5752)
 // ---------------------------------------------------------------
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyAlOW-jx2hsTW0kw25bUKeMBWI7l_ql1BI",
@@ -42,8 +50,15 @@ firebase.initializeApp(FIREBASE_CONFIG);
 const db = firebase.database();
 
 // ---------------------------------------------------------------
-// Banque de questions. "options" = question à dilemme (choix fermé).
+// Réglages du jeu
 // ---------------------------------------------------------------
+const MIN_PLAYERS = 2;
+const MAX_PLAYERS = 12;
+const ANSWER_SECONDS = 45;   // temps pour répondre à une question
+const LINK_SECONDS = 20;     // temps pour relier une réponse
+const FAST_SECONDS = 3;      // délai restant une fois que tout le monde est prêt
+
+// options = question à dilemme (choix fermé)
 const BANK = [
   {text: "Quel est ton film préféré ?"},
   {text: "Quel sport est le plus nul selon toi ?"},
@@ -65,20 +80,20 @@ const BANK = [
 ];
 
 // ---------------------------------------------------------------
-// État local
+// Identité locale (persistée pour pouvoir reprendre après un plantage)
 // ---------------------------------------------------------------
-const me = {
-  id: sessionStorage.getItem('pid') || (() => {
-    const id = Math.random().toString(36).slice(2, 10);
-    sessionStorage.setItem('pid', id);
-    return id;
-  })(),
-  name: sessionStorage.getItem('name') || ''
-};
-let roomCode = sessionStorage.getItem('code') || null;
-let roomRef = null;
-let room = null;
-const drafts = {}; // garde ce que chacun a déjà saisi pendant les mises à jour
+const KEY = {pid: 'mentaliste_pid', code: 'mentaliste_code', name: 'mentaliste_name'};
+function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function newId() { return Math.random().toString(36).slice(2, 10); }
+
+const me = {id: load(KEY.pid) || newId(), name: load(KEY.name) || ''};
+store(KEY.pid, me.id);
+
+let roomCode = null, roomRef = null, room = null;
+let notice = '', lastKey = '';
+const drafts = {};
+let advancingFor = null, advancingAt = 0, shortenedFor = null;
 
 // ---------------------------------------------------------------
 // Utilitaires
@@ -104,7 +119,27 @@ function genCode() {
 
 function playerIds() { return Object.keys(room?.players || {}); }
 function nameOf(id) { return room?.players?.[id]?.name || '?'; }
-function isHost() { return room && room.host === me.id; }
+function isHost() { return !!room && room.host === me.id; }
+function nameInput() { return (document.getElementById('name')?.value || '').trim(); }
+
+// Étapes : n = 0..N-1 réponses ; ensuite N*P étapes de liaison (une réponse à la fois) ; ensuite révélation
+function typeFor(n, r) {
+  const N = r.questions.length;
+  if (n < N) return 'answer';
+  if (n < N + N * r.P) return 'link';
+  return 'reveal';
+}
+function stepOf(r) {
+  const n = r.state.n, N = r.questions.length;
+  const type = typeFor(n, r);
+  if (type === 'answer') return {type, n, q: n};
+  if (type === 'link') {
+    const idx = n - N;
+    return {type, n, q: Math.floor(idx / r.P), k: idx % r.P};
+  }
+  return {type, n};
+}
+function secondsFor(type) { return type === 'answer' ? ANSWER_SECONDS : type === 'link' ? LINK_SECONDS : 0; }
 
 // ---------------------------------------------------------------
 // Connexion à une salle
@@ -112,27 +147,37 @@ function isHost() { return room && room.host === me.id; }
 function listen(code) {
   if (roomRef) roomRef.off();
   roomCode = code;
-  sessionStorage.setItem('code', code);
+  store(KEY.code, code);
   roomRef = db.ref('rooms/' + code);
   roomRef.on('value', snap => {
     room = snap.val();
-    if (!room) { leave(); return; }
+    if (!room) { leaveLocal("La salle n'existe plus."); return; }
     render();
   });
 }
 
-function leave() {
+function leaveLocal(msg = '') {
   if (roomRef) roomRef.off();
   roomRef = null; room = null; roomCode = null;
-  sessionStorage.removeItem('code');
+  store(KEY.code, null);
+  notice = msg;
+  lastKey = '';
   render();
+}
+function leave() { leaveLocal(''); }
+
+function saveMe(name) {
+  me.name = name;
+  store(KEY.name, name);
+  store(KEY.pid, me.id);
 }
 
 async function createRoom() {
-  const name = document.getElementById('name').value.trim();
+  const name = nameInput();
   if (!name) return alert('Entre ton prénom.');
-  me.name = name; sessionStorage.setItem('name', name);
+  notice = '';
   const code = genCode();
+  saveMe(name);
   await db.ref('rooms/' + code).set({
     host: me.id, phase: 'lobby', count: 5,
     players: {[me.id]: {name}}, createdAt: Date.now()
@@ -140,18 +185,27 @@ async function createRoom() {
   listen(code);
 }
 
+// Rejoindre, ou reprendre sa place si on a déjà un joueur avec le même prénom (après un plantage)
 async function joinRoom() {
-  const name = document.getElementById('name').value.trim();
-  const code = document.getElementById('code').value.trim().toUpperCase();
+  const name = nameInput();
+  const code = (document.getElementById('code')?.value || '').trim().toUpperCase();
   if (!name) return alert('Entre ton prénom.');
   if (code.length !== 4) return alert('Le code fait 4 lettres.');
   const snap = await db.ref('rooms/' + code).once('value');
-  if (!snap.exists()) return alert('Salle introuvable.');
   const r = snap.val();
-  if (r.phase !== 'lobby') return alert('La partie a déjà commencé.');
-  if (Object.keys(r.players || {}).length >= 12) return alert('Salle pleine (12 joueurs max).');
-  me.name = name; sessionStorage.setItem('name', name);
-  await db.ref(`rooms/${code}/players/${me.id}`).set({name});
+  if (!r) return alert('Salle introuvable.');
+  const players = r.players || {};
+  const same = Object.keys(players).find(id =>
+    (players[id].name || '').trim().toLowerCase() === name.toLowerCase());
+  if (same) {
+    me.id = same; // on reprend la place existante : points et réponses conservés
+  } else {
+    if (r.phase !== 'lobby') return alert("La partie a déjà commencé. Si tu t'es déconnecté, rejoins avec le prénom que tu avais.");
+    if (Object.keys(players).length >= MAX_PLAYERS) return alert(`Salle pleine (${MAX_PLAYERS} joueurs max).`);
+    await db.ref(`rooms/${code}/players/${me.id}`).set({name});
+  }
+  notice = '';
+  saveMe(name);
   listen(code);
 }
 
@@ -160,203 +214,271 @@ async function joinRoom() {
 // ---------------------------------------------------------------
 async function startGame() {
   const ids = playerIds();
-  if (ids.length < 4) return alert('Il faut au moins 4 joueurs.');
-  const n = parseInt(document.getElementById('count').value, 10) || 5;
-  const count = Math.min(Math.max(n, 3), BANK.length);
-  const questions = shuffle(BANK).slice(0, count);
-  await roomRef.update({phase: 'answer', count, questions, answers: null, links: null, order: null});
+  if (ids.length < MIN_PLAYERS) return alert(`Il faut au moins ${MIN_PLAYERS} joueurs.`);
+  const raw = parseInt(document.getElementById('count')?.value, 10);
+  const N = Math.min(Math.max(raw || 5, 3), BANK.length);
+  const questions = shuffle(BANK).slice(0, N);
+  const order = questions.map(() => shuffle(ids));
+  await roomRef.update({
+    phase: 'game', count: N, P: ids.length, questions, order,
+    answers: null, links: null, ready: null,
+    state: {n: 0, endsAt: Date.now() + ANSWER_SECONDS * 1000}
+  });
 }
 
-async function startLink() {
-  const ids = playerIds();
-  const order = room.questions.map(() => shuffle(ids));
-  await roomRef.update({phase: 'link', order});
+// Passe à l'étape suivante (hôte, ou automatiquement quand le temps est écoulé).
+// La transaction garantit qu'une seule avance a lieu, même si plusieurs téléphones la déclenchent.
+function advance(expectedN) {
+  roomRef.child('state').transaction(cur => {
+    if (!cur || cur.n !== expectedN) return;
+    const next = expectedN + 1;
+    const type = typeFor(next, room);
+    return {n: next, endsAt: type === 'reveal' ? null : Date.now() + secondsFor(type) * 1000};
+  });
 }
 
-async function reveal() { await roomRef.update({phase: 'reveal'}); }
+function skip() { if (room?.state) advance(room.state.n); }
+
+// Quand tout le monde est prêt : on raccourcit le temps restant
+function shorten(n) {
+  roomRef.child('state').transaction(cur => {
+    if (!cur || cur.n !== n) return;
+    const cap = Date.now() + FAST_SECONDS * 1000;
+    if (cur.endsAt > cap) return {n: cur.n, endsAt: cap};
+  });
+}
 
 async function replay() {
-  await roomRef.update({phase: 'lobby', questions: null, answers: null, links: null, order: null});
+  await roomRef.update({phase: 'lobby', P: null, questions: null, order: null, answers: null, links: null, ready: null, state: null});
 }
 
 // ---------------------------------------------------------------
 // Actions des joueurs
 // ---------------------------------------------------------------
-async function submitAnswers() {
-  const arr = room.questions.map((q, i) => {
-    if (q.options) {
-      const sel = document.querySelector(`input[name="r${i}"]:checked`);
-      return sel ? sel.value : '';
-    }
-    return (document.getElementById('a' + i)?.value || '').trim();
-  });
-  if (arr.some(a => !a)) return alert('Réponds à toutes les questions.');
-  await roomRef.child('answers/' + me.id).set(arr);
+async function submitAnswer(silent) {
+  if (!room || room.phase !== 'game') return;
+  const st = stepOf(room);
+  if (st.type !== 'answer' || room.ready?.[st.n]?.[me.id]) return;
+  const q = room.questions[st.q];
+  const key = `ans-${st.n}`;
+  let val;
+  if (q.options) {
+    val = document.querySelector(`input[name="${key}"]:checked`)?.value || drafts[key] || '';
+  } else {
+    val = document.getElementById(key)?.value ?? drafts[key] ?? '';
+  }
+  val = val.trim();
+  if (!val) { if (!silent) alert('Écris ta réponse avant de valider.'); return; }
+  await roomRef.update({[`answers/${me.id}/${st.q}`]: val, [`ready/${st.n}/${me.id}`]: true});
 }
 
-async function submitLinks() {
-  const links = room.questions.map((_, q) =>
-    room.order[q].map((_, k) => document.getElementById(`l${q}_${k}`).value));
-  if (links.some(row => row.some(v => !v))) return alert('Relie toutes les réponses.');
-  await roomRef.child('links/' + me.id).set(links);
+async function pick(authorId) {
+  if (!room || room.phase !== 'game') return;
+  const st = stepOf(room);
+  if (st.type !== 'link' || room.ready?.[st.n]?.[me.id]) return;
+  await roomRef.update({[`links/${me.id}/${st.q}/${st.k}`]: authorId, [`ready/${st.n}/${me.id}`]: true});
 }
 
 // ---------------------------------------------------------------
-// Calcul des points
-// +1 par bonne association (sauf relier sa propre réponse : 0 point)
-// +2 de bonus si toutes les réponses d'une question sont bien reliées
+// Boucle de temps : compte à rebours, accélération, passage automatique
+// Tous les téléphones font tourner cette boucle, donc la partie ne dépend pas de l'hôte.
+// ---------------------------------------------------------------
+setInterval(tick, 250);
+function tick() {
+  if (!room || room.phase !== 'game' || !room.state) return;
+  const st = stepOf(room);
+  if (st.type === 'reveal') return;
+  const now = Date.now();
+  const left = room.state.endsAt - now;
+  const t = document.getElementById('timer');
+  if (t) t.textContent = Math.max(0, Math.ceil(left / 1000)) + ' s';
+
+  const readyCount = Object.keys(room.ready?.[st.n] || {}).length;
+  if (readyCount >= playerIds().length && left > FAST_SECONDS * 1000 && shortenedFor !== st.n) {
+    shortenedFor = st.n;
+    shorten(st.n);
+  }
+  if (left <= 0 && (advancingFor !== st.n || now - advancingAt > 3000)) {
+    advancingFor = st.n;
+    advancingAt = now;
+    if (st.type === 'answer' && !room.ready?.[st.n]?.[me.id]) submitAnswer(true); // envoie le brouillon au temps écoulé
+    advance(st.n);
+  }
+}
+
+// ---------------------------------------------------------------
+// Score
+// +1 par bonne association (0 si on relie sa propre réponse)
+// +2 de bonus si toutes les réponses d'une question sont bien reliées (sa propre réponse comprise)
 // ---------------------------------------------------------------
 function computeScores() {
-  const ids = playerIds();
-  const scores = {};
-  ids.forEach(p => scores[p] = {pts: 0, bonus: 0});
+  const ids = playerIds(), s = {};
+  ids.forEach(p => s[p] = {pts: 0, bonus: 0});
   room.questions.forEach((_, q) => {
+    const order = room.order[q];
     ids.forEach(p => {
-      const guesses = room.links?.[p]?.[q] || [];
-      let allOk = true;
-      room.order[q].forEach((author, k) => {
-        const ok = guesses[k] === author;
-        if (!ok) allOk = false;
-        if (ok && author !== p) scores[p].pts += 1;
+      let all = true;
+      order.forEach((author, k) => {
+        const ok = room.links?.[p]?.[q]?.[k] === author;
+        if (!ok) all = false;
+        if (ok && author !== p) s[p].pts += 1;
       });
-      if (allOk) scores[p].bonus += 2;
+      if (all) s[p].bonus += 2;
     });
   });
-  return scores;
+  return s;
 }
 
 // ---------------------------------------------------------------
 // Rendu
 // ---------------------------------------------------------------
 function saveDrafts() {
-  document.querySelectorAll('textarea, select').forEach(el => { if (el.id) drafts[el.id] = el.value; });
+  document.querySelectorAll('textarea, input[type=text], input[type=number]').forEach(el => {
+    if (el.id) drafts[el.id] = el.value;
+  });
   document.querySelectorAll('input[type=radio]:checked').forEach(el => { drafts[el.name] = el.value; });
 }
 
 function restoreDrafts() {
-  Object.entries(drafts).forEach(([key, value]) => {
+  Object.entries(drafts).forEach(([key, val]) => {
     const el = document.getElementById(key);
-    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) el.value = value;
-    const radio = document.querySelector(`input[name="${key}"][value="${CSS.escape(value)}"]`);
+    if (el && el.type !== 'radio') el.value = val;
+    const radio = document.querySelector(`input[type=radio][name="${CSS.escape(key)}"][value="${CSS.escape(val)}"]`);
     if (radio) radio.checked = true;
   });
 }
 
 document.addEventListener('input', e => { if (e.target.id) drafts[e.target.id] = e.target.value; });
-document.addEventListener('change', e => {
-  if (e.target.type === 'radio') drafts[e.target.name] = e.target.value;
-  else if (e.target.id) drafts[e.target.id] = e.target.value;
-});
+document.addEventListener('change', e => { if (e.target.type === 'radio') drafts[e.target.name] = e.target.value; });
 
 function render() {
   saveDrafts();
-  const app = document.getElementById('app');
-  if (!room) { app.innerHTML = renderHome(); }
-  else if (room.phase === 'lobby') app.innerHTML = renderLobby();
-  else if (room.phase === 'answer') app.innerHTML = renderAnswer();
-  else if (room.phase === 'link') app.innerHTML = renderLink();
-  else if (room.phase === 'reveal') app.innerHTML = renderReveal();
+  let html, key;
+  if (!room) {
+    html = renderHome(); key = 'home';
+  } else if (!room.players?.[me.id]) {
+    notice = "Tu n'es pas dans cette salle. Rejoins-la avec ton prénom.";
+    html = renderHome(); key = 'home';
+  } else if (room.phase === 'lobby') {
+    html = renderLobby(); key = 'lobby';
+  } else {
+    const st = stepOf(room);
+    html = st.type === 'reveal' ? renderReveal() : renderGame(st);
+    const done = !!room.ready?.[st.n]?.[me.id];
+    key = `game|${st.n}|${done}|${st.type}`;
+  }
+  // Ne pas redessiner pendant qu'on tape, sauf si l'écran a changé
+  if (key === lastKey && ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName)) return;
+  lastKey = key;
+  document.getElementById('app').innerHTML = html;
   restoreDrafts();
 }
 
 function renderHome() {
   return `
     <h1>Qui a dit quoi ?</h1>
+    ${notice ? `<div class="card notice">${esc(notice)}</div>` : ''}
     <div class="card">
-      <input id="name" placeholder="Ton prénom" value="${esc(me.name)}">
+      <input id="name" type="text" placeholder="Ton prénom" value="${esc(me.name)}" maxlength="20">
       <button onclick="createRoom()">Créer une salle</button>
     </div>
     <div class="card">
-      <input id="code" placeholder="Code de la salle (4 lettres)" maxlength="4">
+      <input id="code" type="text" placeholder="Code de la salle (4 lettres)" maxlength="4">
       <button onclick="joinRoom()">Rejoindre</button>
+      <p class="muted">Si ton téléphone a planté, rejoins avec le même prénom : tu reprends ta place et tes points.</p>
     </div>`;
 }
 
 function renderLobby() {
   const ids = playerIds();
-  const list = ids.map(id => `<li>${esc(nameOf(id))}${id === room.host ? ' (hôte)' : ''}</li>`).join('');
+  const list = ids.map(id =>
+    `<li>${esc(nameOf(id))}${id === room.host ? ' (hôte)' : ''}${id === me.id ? ' — toi' : ''}</li>`).join('');
+  const enough = ids.length >= MIN_PLAYERS;
   const hostPart = isHost() ? `
-    <label>Nombre de questions (3 à ${BANK.length})</label>
+    <label class="muted">Nombre de questions (3 à ${BANK.length})</label>
     <input id="count" type="number" min="3" max="${BANK.length}" value="${room.count || 5}">
-    <button onclick="startGame()">Lancer la partie (${ids.length} joueur${ids.length > 1 ? 's' : ''})</button>
-    ${ids.length < 4 ? '<p class="muted">Il faut au moins 4 joueurs.</p>' : ''}`
+    <button onclick="startGame()" ${enough ? '' : 'disabled'}>Lancer la partie (${ids.length} joueur${ids.length > 1 ? 's' : ''})</button>
+    ${enough ? '' : `<p class="muted">Il faut au moins ${MIN_PLAYERS} joueurs.</p>`}`
     : '<p class="muted">En attente que l\'hôte lance la partie…</p>';
   return `
     <h1>Salle</h1>
     <div class="card"><p class="muted">Code à partager :</p><div class="code">${esc(roomCode)}</div></div>
-    <div class="card"><ul>${list}</ul>${hostPart}</div>`;
+    <div class="card"><ul>${list}</ul>${hostPart}</div>
+    <button class="secondary" onclick="leave()">Quitter la salle</button>`;
 }
 
-function renderAnswer() {
+function renderGame(st) {
   const ids = playerIds();
-  const answered = Object.keys(room.answers || {});
-  const done = answered.includes(me.id);
-  if (done) {
-    return `<h1>Phase 1 : réponses</h1>
-      <div class="card"><p>Tes réponses sont envoyées. En attente des autres…</p>
-      <p class="muted">${answered.length}/${ids.length} ont répondu</p></div>
-      ${isHost() && answered.length === ids.length ? '<button onclick="startLink()">Passer à la liaison</button>' : ''}`;
-  }
-  const form = room.questions.map((q, i) => {
-    if (q.options) {
-      const radios = q.options.map(o =>
-        `<label><input type="radio" name="r${i}" value="${esc(o)}"> ${esc(o)}</label>`).join('');
-      return `<div class="card"><b>${esc(q.text)}</b><div class="choice">${radios}</div></div>`;
-    }
-    return `<div class="card"><b>${esc(q.text)}</b><textarea id="a${i}" placeholder="Ta réponse"></textarea></div>`;
-  }).join('');
-  return `<h1>Phase 1 : réponses</h1>${form}
-    <button onclick="submitAnswers()">Envoyer mes réponses</button>`;
-}
+  const readyMap = room.ready?.[st.n] || {};
+  const done = !!readyMap[me.id];
+  const footer = `
+    <p class="muted">Prêts : ${Object.keys(readyMap).length}/${ids.length}</p>
+    ${isHost() ? '<button class="secondary" onclick="skip()">Passer à la suite (hôte)</button>' : ''}
+    <button class="secondary" onclick="leave()">Quitter</button>`;
 
-function renderLink() {
-  const ids = playerIds();
-  const linked = Object.keys(room.links || {});
-  if (linked.includes(me.id)) {
-    return `<h1>Phase 2 : liaison</h1>
-      <div class="card"><p>Tes choix sont envoyés. En attente des autres…</p>
-      <p class="muted">${linked.length}/${ids.length} ont voté</p></div>
-      ${isHost() && linked.length === ids.length ? '<button onclick="reveal()">Révéler les scores</button>' : ''}`;
+  if (st.type === 'answer') {
+    const q = room.questions[st.q];
+    const key = `ans-${st.n}`;
+    const input = q.options
+      ? q.options.map(o => `<label class="choice"><input type="radio" name="${key}" value="${esc(o)}" ${done ? 'disabled' : ''}>${esc(o)}</label>`).join('')
+      : `<textarea id="${key}" placeholder="Ta réponse" ${done ? 'disabled' : ''}></textarea>`;
+    const body = done
+      ? '<p>Réponse envoyée. En attente des autres…</p>'
+      : `${input}<button onclick="submitAnswer(false)">Prêt</button>`;
+    return `
+      <h2>Question ${st.q + 1} / ${room.questions.length}</h2>
+      <div class="timer" id="timer"></div>
+      <div class="card"><b>${esc(q.text)}</b>${body}</div>
+      ${footer}`;
   }
-  const options = ids.map(id => `<option value="${esc(id)}">${esc(nameOf(id))}</option>`).join('');
-  const blocks = room.questions.map((q, qi) => {
-    const rows = room.order[qi].map((author, k) => {
-      const answer = room.answers[author][qi];
-      return `<div class="answer">${esc(answer)}
-        <select id="l${qi}_${k}"><option value="">— qui a écrit ça ? —</option>${options}</select></div>`;
-    }).join('');
-    return `<div class="card"><b>${esc(q.text)}</b>${rows}</div>`;
-  }).join('');
-  return `<h1>Phase 2 : liaison</h1>
-    <p class="muted">Relie chaque réponse à son auteur. Les réponses sont anonymes.</p>
-    ${blocks}
-    <button onclick="submitLinks()">Envoyer mes liens</button>`;
+
+  // Liaison : une réponse à la fois, sans voir les autres
+  const q = room.questions[st.q];
+  const author = room.order[st.q][st.k];
+  const text = room.answers?.[author]?.[st.q] || '(pas de réponse)';
+  const picks = ids.map(id => `<button onclick="pick('${id}')">${esc(nameOf(id))}</button>`).join('');
+  const body = done
+    ? '<p>Ton choix est envoyé. En attente des autres…</p>'
+    : `<p class="muted">Qui a écrit cette réponse ?</p><div class="picks">${picks}</div>`;
+  return `
+    <h2>Réponse ${st.k + 1} / ${room.P} · question ${st.q + 1}</h2>
+    <div class="timer" id="timer"></div>
+    <div class="card">
+      <div class="muted">${esc(q.text)}</div>
+      <div class="answer big">${esc(text)}</div>
+      ${body}
+    </div>
+    ${footer}`;
 }
 
 function renderReveal() {
-  const ids = playerIds();
-  const scores = computeScores();
+  const ids = playerIds(), s = computeScores();
   const rows = ids
-    .map(id => ({id, ...scores[id], total: scores[id].pts + scores[id].bonus}))
+    .map(id => ({id, ...s[id], total: s[id].pts + s[id].bonus}))
     .sort((a, b) => b.total - a.total)
-    .map(r => `<tr><td>${esc(nameOf(r.id))}</td><td>${r.pts}</td><td>${r.bonus}</td><td><b>${r.total}</b></td></tr>`)
+    .map(r => `<tr><td>${esc(nameOf(r.id))}${r.id === me.id ? ' (toi)' : ''}</td><td>${r.pts}</td><td>${r.bonus}</td><td><b>${r.total}</b></td></tr>`)
     .join('');
-  const details = room.questions.map((q, qi) => {
+  const recap = room.questions.map((q, qi) => {
     const items = room.order[qi].map(author =>
-      `<div class="answer">${esc(room.answers[author][qi])} <span class="muted">— ${esc(nameOf(author))}</span></div>`).join('');
+      `<div class="answer">${esc(room.answers?.[author]?.[qi] || '(pas de réponse)')} <span class="muted">— ${esc(nameOf(author))}</span></div>`).join('');
     return `<div class="card"><b>${esc(q.text)}</b>${items}</div>`;
   }).join('');
-  return `<h1>Résultats</h1>
+  return `
+    <h1>Résultats</h1>
     <div class="card"><table>
       <tr><th>Joueur</th><th>Points</th><th>Bonus</th><th>Total</th></tr>${rows}
     </table></div>
-    ${details}
+    <h2>Toutes les réponses</h2>
+    ${recap}
     ${isHost() ? '<button onclick="replay()">Rejouer dans cette salle</button>' : ''}
     <button class="secondary" onclick="leave()">Quitter</button>`;
 }
 
-// Reprise de session après rafraîchissement
-if (roomCode) listen(roomCode); else render();
+// ---------------------------------------------------------------
+// Démarrage : reprise automatique si on était déjà dans une salle
+// ---------------------------------------------------------------
+const savedCode = load(KEY.code);
+if (savedCode) listen(savedCode); else render();
 </script>
 </body>
 </html>
