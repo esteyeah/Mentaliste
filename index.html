@@ -9,7 +9,9 @@
   h1{font-size:1.6rem;text-align:center}
   h2{font-size:1.2rem;margin:12px 0 4px}
   .card{background:#fff;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-  input,textarea{width:100%;box-sizing:border-box;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:8px;margin:4px 0}
+  input,textarea,select{width:100%;box-sizing:border-box;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:8px;margin:4px 0}
+  input[type=radio]{width:auto;margin-right:6px}
+  input[type=range]{width:calc(100% - 50px)}
   textarea{min-height:70px}
   button{padding:12px 18px;font-size:1rem;border:0;border-radius:8px;background:#6c4cf1;color:#fff;cursor:pointer;margin:6px 0;width:100%}
   button:disabled{background:#bbb;cursor:not-allowed}
@@ -20,12 +22,20 @@
   .answer{padding:10px;border-left:4px solid #6c4cf1;background:#faf9ff;margin:6px 0;border-radius:6px}
   .answer.big{font-size:1.2rem;padding:16px;margin:12px 0}
   .picks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .picks button{margin:0}
+  .picks button{margin:0;background:#fff;color:#222;border:1px solid #ccc;padding:8px}
+  .picks button:hover{border-color:#6c4cf1}
   .notice{background:#fff3cd;color:#664d03}
   table{width:100%;border-collapse:collapse}
   td,th{padding:6px;border-bottom:1px solid #eee;text-align:left}
   .choice{display:block;padding:6px 0}
-  .choice input{width:auto;margin-right:6px}
+  .who{display:inline-flex;align-items:center;gap:6px}
+  .av{display:inline-flex;width:34px;height:34px;border-radius:50%;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+  .tierrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 0}
+  .tierrow select{width:auto;margin:0}
+  .rate{display:flex;align-items:center;gap:8px}
+  .rate output{min-width:24px;font-weight:bold}
+  .bar{height:10px;background:#6c4cf1;border-radius:6px;margin:4px 0}
+  .win{font-weight:bold;color:#6c4cf1}
 </style>
 </head>
 <body>
@@ -50,15 +60,21 @@ firebase.initializeApp(FIREBASE_CONFIG);
 const db = firebase.database();
 
 // ---------------------------------------------------------------
-// Réglages du jeu
+// Réglages
 // ---------------------------------------------------------------
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 12;
 const ANSWER_SECONDS = 45;   // temps pour répondre à une question
 const LINK_SECONDS = 20;     // temps pour relier une réponse
 const FAST_SECONDS = 3;      // délai restant une fois que tout le monde est prêt
+const VOTE_POINTS = 2;       // points pour le ou les joueurs les plus désignés
 
-// options = question à dilemme (choix fermé)
+// Types de questions :
+//  (sans type)  texte libre, à relier
+//  options      choix fermé, à relier
+//  rate         note de 0 à 10 ; avec pseudo:true, on note le pseudo d'un joueur tiré au sort ({cible})
+//  tier         classement d'éléments en S/A/B/C/D
+//  vote         on clique sur un joueur ; les plus désignés gagnent des points
 const BANK = [
   {text: "Quel est ton film préféré ?"},
   {text: "Quel sport est le plus nul selon toi ?"},
@@ -76,11 +92,39 @@ const BANK = [
   {text: "Plutôt pizza ou sushi ?", options: ["Pizza", "Sushi"]},
   {text: "Plutôt montagne ou mer ?", options: ["Montagne", "Mer"]},
   {text: "Plutôt rester chez soi ou sortir toute la nuit ?", options: ["Rester chez soi", "Sortir"]},
-  {text: "Plutôt voyager seul ou en groupe ?", options: ["Seul", "En groupe"]}
+  {text: "Plutôt voyager seul ou en groupe ?", options: ["Seul", "En groupe"]},
+  {text: "À combien notes-tu ta journée, sur 10 ?", type: "rate"},
+  {text: "À combien notes-tu le pseudo de {cible}, sur 10 ?", type: "rate", pseudo: true},
+  {text: "Classe ces plats, du meilleur au pire.", type: "tier", items: ["Pizza", "Tacos", "Sushi", "Pâtes", "Couscous"]},
+  {text: "Classe ces jeux de société, du meilleur au pire.", type: "tier", items: ["Monopoly", "Uno", "Loup-garou", "Time's up", "Échecs"]},
+  {text: "Qui trouves-tu le plus radin parmi les joueurs ?", type: "vote"},
+  {text: "Qui a le plus de chances de devenir célèbre ?", type: "vote"},
+  {text: "Qui survivrait le mieux sur une île déserte ?", type: "vote"}
 ];
 
 // ---------------------------------------------------------------
-// Identité locale (persistée pour pouvoir reprendre après un plantage)
+// Avatars (un par joueur, attribué à l'arrivée dans la salle)
+// ---------------------------------------------------------------
+const AVATARS = [
+  {e: '🦊', c: '#ffd6a5'}, {e: '🐼', c: '#e0e0e0'}, {e: '🐸', c: '#b9f6ca'}, {e: '🐙', c: '#d1c4e9'},
+  {e: '🦄', c: '#f8bbd0'}, {e: '🐯', c: '#ffe082'}, {e: '🐨', c: '#cfd8dc'}, {e: '🐵', c: '#d7ccc8'},
+  {e: '🐧', c: '#b3e5fc'}, {e: '🦉', c: '#c5cae9'}, {e: '🐢', c: '#c8e6c9'}, {e: '🐬', c: '#b2ebf2'}
+];
+function hashStr(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
+function avatarOf(id) {
+  const idx = room?.players?.[id]?.av;
+  const i = typeof idx === 'number' ? idx : hashStr(id) % AVATARS.length;
+  return AVATARS[i % AVATARS.length];
+}
+function freeAvatar(players) {
+  const used = new Set(Object.values(players || {}).map(p => p.av));
+  const free = AVATARS.map((_, i) => i).filter(i => !used.has(i));
+  const pool = free.length ? free : AVATARS.map((_, i) => i);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// ---------------------------------------------------------------
+// Identité locale (persistée pour reprendre après un plantage)
 // ---------------------------------------------------------------
 const KEY = {pid: 'mentaliste_pid', code: 'mentaliste_code', name: 'mentaliste_name'};
 function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} }
@@ -121,23 +165,37 @@ function playerIds() { return Object.keys(room?.players || {}); }
 function nameOf(id) { return room?.players?.[id]?.name || '?'; }
 function isHost() { return !!room && room.host === me.id; }
 function nameInput() { return (document.getElementById('name')?.value || '').trim(); }
+function who(id) {
+  const a = avatarOf(id);
+  return `<span class="who"><span class="av" style="background:${a.c}">${a.e}</span>${esc(nameOf(id))}</span>`;
+}
+function kindOf(q) { return q.type || (q.options ? 'choice' : 'text'); }
+function questionText(q) { return q.pseudo && q.target ? q.text.replace('{cible}', nameOf(q.target)) : q.text; }
+function linkQs() { return room?.linkQs || []; }
 
-// Étapes : n = 0..N-1 réponses ; ensuite N*P étapes de liaison (une réponse à la fois) ; ensuite révélation
+// Étapes : N réponses (une par question), puis une étape par réponse à relier (questions texte/choix), puis révélation
 function typeFor(n, r) {
-  const N = r.questions.length;
+  const N = r.questions.length, L = (r.linkQs || []).length;
   if (n < N) return 'answer';
-  if (n < N + N * r.P) return 'link';
+  if (n < N + L * r.P) return 'link';
   return 'reveal';
 }
 function stepOf(r) {
-  const n = r.state.n, N = r.questions.length;
-  const type = typeFor(n, r);
+  const n = r.state.n, N = r.questions.length, type = typeFor(n, r);
   if (type === 'answer') return {type, n, q: n};
   if (type === 'link') {
-    const idx = n - N;
-    return {type, n, q: Math.floor(idx / r.P), k: idx % r.P};
+    const idx = n - N, j = Math.floor(idx / r.P), k = idx % r.P;
+    return {type, n, j, q: r.linkQs[j], k};
   }
   return {type, n};
+}
+// Nombre de joueurs qui doivent répondre à cette étape (la cible d'une note de pseudo ne répond pas)
+function expectedFor(st) {
+  if (st.type === 'answer') {
+    const target = room.questions[st.q].target;
+    return playerIds().filter(id => id !== target).length;
+  }
+  return playerIds().length;
 }
 function secondsFor(type) { return type === 'answer' ? ANSWER_SECONDS : type === 'link' ? LINK_SECONDS : 0; }
 
@@ -180,12 +238,12 @@ async function createRoom() {
   saveMe(name);
   await db.ref('rooms/' + code).set({
     host: me.id, phase: 'lobby', count: 5,
-    players: {[me.id]: {name}}, createdAt: Date.now()
+    players: {[me.id]: {name, av: freeAvatar({})}}, createdAt: Date.now()
   });
   listen(code);
 }
 
-// Rejoindre, ou reprendre sa place si on a déjà un joueur avec le même prénom (après un plantage)
+// Rejoindre, ou reprendre sa place si un joueur porte déjà ce prénom (après un plantage)
 async function joinRoom() {
   const name = nameInput();
   const code = (document.getElementById('code')?.value || '').trim().toUpperCase();
@@ -198,11 +256,11 @@ async function joinRoom() {
   const same = Object.keys(players).find(id =>
     (players[id].name || '').trim().toLowerCase() === name.toLowerCase());
   if (same) {
-    me.id = same; // on reprend la place existante : points et réponses conservés
+    me.id = same; // on reprend la place : points, réponses et avatar conservés
   } else {
     if (r.phase !== 'lobby') return alert("La partie a déjà commencé. Si tu t'es déconnecté, rejoins avec le prénom que tu avais.");
     if (Object.keys(players).length >= MAX_PLAYERS) return alert(`Salle pleine (${MAX_PLAYERS} joueurs max).`);
-    await db.ref(`rooms/${code}/players/${me.id}`).set({name});
+    await db.ref(`rooms/${code}/players/${me.id}`).set({name, av: freeAvatar(players)});
   }
   notice = '';
   saveMe(name);
@@ -217,17 +275,22 @@ async function startGame() {
   if (ids.length < MIN_PLAYERS) return alert(`Il faut au moins ${MIN_PLAYERS} joueurs.`);
   const raw = parseInt(document.getElementById('count')?.value, 10);
   const N = Math.min(Math.max(raw || 5, 3), BANK.length);
-  const questions = shuffle(BANK).slice(0, N);
-  const order = questions.map(() => shuffle(ids));
+  const questions = shuffle(BANK).slice(0, N).map(q => {
+    const c = {...q};
+    if (q.pseudo) c.target = shuffle(ids)[0];
+    return c;
+  });
+  const linkQs = questions.map((_, i) => i).filter(i => ['text', 'choice'].includes(kindOf(questions[i])));
+  const order = linkQs.map(() => shuffle(ids));
   await roomRef.update({
-    phase: 'game', count: N, P: ids.length, questions, order,
+    phase: 'game', count: N, P: ids.length, questions, linkQs, order,
     answers: null, links: null, ready: null,
     state: {n: 0, endsAt: Date.now() + ANSWER_SECONDS * 1000}
   });
 }
 
-// Passe à l'étape suivante (hôte, ou automatiquement quand le temps est écoulé).
-// La transaction garantit qu'une seule avance a lieu, même si plusieurs téléphones la déclenchent.
+// Passe à l'étape suivante. La transaction garantit qu'une seule avance a lieu,
+// même si plusieurs téléphones la déclenchent en même temps.
 function advance(expectedN) {
   roomRef.child('state').transaction(cur => {
     if (!cur || cur.n !== expectedN) return;
@@ -239,7 +302,7 @@ function advance(expectedN) {
 
 function skip() { if (room?.state) advance(room.state.n); }
 
-// Quand tout le monde est prêt : on raccourcit le temps restant
+// Tout le monde est prêt : on raccourcit le temps restant
 function shorten(n) {
   roomRef.child('state').transaction(cur => {
     if (!cur || cur.n !== n) return;
@@ -249,7 +312,7 @@ function shorten(n) {
 }
 
 async function replay() {
-  await roomRef.update({phase: 'lobby', P: null, questions: null, order: null, answers: null, links: null, ready: null, state: null});
+  await roomRef.update({phase: 'lobby', P: null, questions: null, linkQs: null, order: null, answers: null, links: null, ready: null, state: null});
 }
 
 // ---------------------------------------------------------------
@@ -258,18 +321,36 @@ async function replay() {
 async function submitAnswer(silent) {
   if (!room || room.phase !== 'game') return;
   const st = stepOf(room);
-  if (st.type !== 'answer' || room.ready?.[st.n]?.[me.id]) return;
   const q = room.questions[st.q];
-  const key = `ans-${st.n}`;
+  if (st.type !== 'answer' || room.ready?.[st.n]?.[me.id] || me.id === q.target) return;
+  const kind = kindOf(q), key = `ans-${st.n}`;
+  if (kind === 'vote') return; // le vote se fait en cliquant sur un joueur
   let val;
-  if (q.options) {
+  if (kind === 'rate') {
+    const el = document.getElementById(key);
+    val = el ? Number(el.value) : (drafts[key] != null ? Number(drafts[key]) : 5);
+  } else if (kind === 'tier') {
+    const arr = q.items.map((_, i) => document.getElementById(`${key}-${i}`)?.value || drafts[`${key}-${i}`] || '');
+    if (arr.some(v => !v)) {
+      if (!silent) return alert('Classe tous les éléments.');
+    }
+    val = arr.map(v => v || 'C');
+  } else if (q.options) {
     val = document.querySelector(`input[name="${key}"]:checked`)?.value || drafts[key] || '';
+    if (!val) { if (!silent) alert('Choisis une réponse.'); return; }
   } else {
-    val = document.getElementById(key)?.value ?? drafts[key] ?? '';
+    val = (document.getElementById(key)?.value ?? drafts[key] ?? '').trim();
+    if (!val) { if (!silent) alert('Écris ta réponse avant de valider.'); return; }
   }
-  val = val.trim();
-  if (!val) { if (!silent) alert('Écris ta réponse avant de valider.'); return; }
   await roomRef.update({[`answers/${me.id}/${st.q}`]: val, [`ready/${st.n}/${me.id}`]: true});
+}
+
+async function vote(targetId) {
+  if (!room || room.phase !== 'game') return;
+  const st = stepOf(room);
+  if (st.type !== 'answer' || kindOf(room.questions[st.q]) !== 'vote') return;
+  if (room.ready?.[st.n]?.[me.id] || targetId === me.id) return;
+  await roomRef.update({[`answers/${me.id}/${st.q}`]: targetId, [`ready/${st.n}/${me.id}`]: true});
 }
 
 async function pick(authorId) {
@@ -280,8 +361,8 @@ async function pick(authorId) {
 }
 
 // ---------------------------------------------------------------
-// Boucle de temps : compte à rebours, accélération, passage automatique
-// Tous les téléphones font tourner cette boucle, donc la partie ne dépend pas de l'hôte.
+// Boucle de temps : compte à rebours, accélération, passage automatique.
+// Tous les téléphones font tourner cette boucle : la partie ne dépend pas de l'hôte.
 // ---------------------------------------------------------------
 setInterval(tick, 250);
 function tick() {
@@ -294,46 +375,66 @@ function tick() {
   if (t) t.textContent = Math.max(0, Math.ceil(left / 1000)) + ' s';
 
   const readyCount = Object.keys(room.ready?.[st.n] || {}).length;
-  if (readyCount >= playerIds().length && left > FAST_SECONDS * 1000 && shortenedFor !== st.n) {
+  if (readyCount >= expectedFor(st) && left > FAST_SECONDS * 1000 && shortenedFor !== st.n) {
     shortenedFor = st.n;
     shorten(st.n);
   }
   if (left <= 0 && (advancingFor !== st.n || now - advancingAt > 3000)) {
     advancingFor = st.n;
     advancingAt = now;
-    if (st.type === 'answer' && !room.ready?.[st.n]?.[me.id]) submitAnswer(true); // envoie le brouillon au temps écoulé
+    if (st.type === 'answer' && !room.ready?.[st.n]?.[me.id]) submitAnswer(true);
     advance(st.n);
   }
 }
 
 // ---------------------------------------------------------------
-// Score
-// +1 par bonne association (0 si on relie sa propre réponse)
-// +2 de bonus si toutes les réponses d'une question sont bien reliées (sa propre réponse comprise)
+// Scores
+//  Liens   : +1 par bonne association (0 si on relie sa propre réponse)
+//  Bonus   : +2 si toutes les réponses d'une question sont bien reliées
+//  Votes   : +2 pour le ou les joueurs les plus désignés (égalité : tous ceux à égalité)
+// Les votes restent anonymes : on affiche seulement le total par joueur.
 // ---------------------------------------------------------------
 function computeScores() {
   const ids = playerIds(), s = {};
-  ids.forEach(p => s[p] = {pts: 0, bonus: 0});
-  room.questions.forEach((_, q) => {
-    const order = room.order[q];
+  ids.forEach(p => s[p] = {links: 0, bonus: 0, vote: 0});
+  linkQs().forEach((qi, j) => {
+    const order = room.order[j];
     ids.forEach(p => {
       let all = true;
       order.forEach((author, k) => {
-        const ok = room.links?.[p]?.[q]?.[k] === author;
+        const ok = room.links?.[p]?.[qi]?.[k] === author;
         if (!ok) all = false;
-        if (ok && author !== p) s[p].pts += 1;
+        if (ok && author !== p) s[p].links += 1;
       });
       if (all) s[p].bonus += 2;
     });
   });
+  room.questions.forEach((q, qi) => {
+    if (kindOf(q) !== 'vote') return;
+    const counts = voteCounts(qi);
+    const max = Math.max(0, ...Object.values(counts));
+    if (max > 0) Object.keys(counts).forEach(t => { if (counts[t] === max && s[t]) s[t].vote += VOTE_POINTS; });
+  });
   return s;
 }
+
+function voteCounts(qi) {
+  const counts = {};
+  playerIds().forEach(p => {
+    const t = room.answers?.[p]?.[qi];
+    if (t) counts[t] = (counts[t] || 0) + 1;
+  });
+  return counts;
+}
+
+const TIER_SCORE = {S: 5, A: 4, B: 3, C: 2, D: 1};
+function tierOf(avg) { return avg >= 4.5 ? 'S' : avg >= 3.5 ? 'A' : avg >= 2.5 ? 'B' : avg >= 1.5 ? 'C' : 'D'; }
 
 // ---------------------------------------------------------------
 // Rendu
 // ---------------------------------------------------------------
 function saveDrafts() {
-  document.querySelectorAll('textarea, input[type=text], input[type=number]').forEach(el => {
+  document.querySelectorAll('textarea, select, input[type=text], input[type=number], input[type=range]').forEach(el => {
     if (el.id) drafts[el.id] = el.value;
   });
   document.querySelectorAll('input[type=radio]:checked').forEach(el => { drafts[el.name] = el.value; });
@@ -342,14 +443,20 @@ function saveDrafts() {
 function restoreDrafts() {
   Object.entries(drafts).forEach(([key, val]) => {
     const el = document.getElementById(key);
-    if (el && el.type !== 'radio') el.value = val;
+    if (el && el.type !== 'radio') {
+      el.value = val;
+      if (el.type === 'range' && el.nextElementSibling) el.nextElementSibling.textContent = val;
+    }
     const radio = document.querySelector(`input[type=radio][name="${CSS.escape(key)}"][value="${CSS.escape(val)}"]`);
     if (radio) radio.checked = true;
   });
 }
 
 document.addEventListener('input', e => { if (e.target.id) drafts[e.target.id] = e.target.value; });
-document.addEventListener('change', e => { if (e.target.type === 'radio') drafts[e.target.name] = e.target.value; });
+document.addEventListener('change', e => {
+  if (e.target.type === 'radio') drafts[e.target.name] = e.target.value;
+  else if (e.target.id) drafts[e.target.id] = e.target.value;
+});
 
 function render() {
   saveDrafts();
@@ -368,7 +475,7 @@ function render() {
     key = `game|${st.n}|${done}|${st.type}`;
   }
   // Ne pas redessiner pendant qu'on tape, sauf si l'écran a changé
-  if (key === lastKey && ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName)) return;
+  if (key === lastKey && ['TEXTAREA', 'INPUT', 'SELECT'].includes(document.activeElement?.tagName)) return;
   lastKey = key;
   document.getElementById('app').innerHTML = html;
   restoreDrafts();
@@ -392,7 +499,7 @@ function renderHome() {
 function renderLobby() {
   const ids = playerIds();
   const list = ids.map(id =>
-    `<li>${esc(nameOf(id))}${id === room.host ? ' (hôte)' : ''}${id === me.id ? ' — toi' : ''}</li>`).join('');
+    `<li>${who(id)}${id === room.host ? ' <span class="muted">(hôte)</span>' : ''}${id === me.id ? ' <span class="muted">— toi</span>' : ''}</li>`).join('');
   const enough = ids.length >= MIN_PLAYERS;
   const hostPart = isHost() ? `
     <label class="muted">Nombre de questions (3 à ${BANK.length})</label>
@@ -403,7 +510,7 @@ function renderLobby() {
   return `
     <h1>Salle</h1>
     <div class="card"><p class="muted">Code à partager :</p><div class="code">${esc(roomCode)}</div></div>
-    <div class="card"><ul>${list}</ul>${hostPart}</div>
+    <div class="card"><ul style="list-style:none;padding:0">${list}</ul>${hostPart}</div>
     <button class="secondary" onclick="leave()">Quitter la salle</button>`;
 }
 
@@ -412,31 +519,44 @@ function renderGame(st) {
   const readyMap = room.ready?.[st.n] || {};
   const done = !!readyMap[me.id];
   const footer = `
-    <p class="muted">Prêts : ${Object.keys(readyMap).length}/${ids.length}</p>
+    <p class="muted">Prêts : ${Object.keys(readyMap).length}/${expectedFor(st)}</p>
     ${isHost() ? '<button class="secondary" onclick="skip()">Passer à la suite (hôte)</button>' : ''}
     <button class="secondary" onclick="leave()">Quitter</button>`;
 
   if (st.type === 'answer') {
-    const q = room.questions[st.q];
-    const key = `ans-${st.n}`;
-    const input = q.options
-      ? q.options.map(o => `<label class="choice"><input type="radio" name="${key}" value="${esc(o)}" ${done ? 'disabled' : ''}>${esc(o)}</label>`).join('')
-      : `<textarea id="${key}" placeholder="Ta réponse" ${done ? 'disabled' : ''}></textarea>`;
-    const body = done
-      ? '<p>Réponse envoyée. En attente des autres…</p>'
-      : `${input}<button onclick="submitAnswer(false)">Prêt</button>`;
-    return `
-      <h2>Question ${st.q + 1} / ${room.questions.length}</h2>
-      <div class="timer" id="timer"></div>
-      <div class="card"><b>${esc(q.text)}</b>${body}</div>
-      ${footer}`;
+    const q = room.questions[st.q], kind = kindOf(q), key = `ans-${st.n}`;
+    const header = `<h2>Question ${st.q + 1} / ${room.questions.length}</h2><div class="timer" id="timer"></div>`;
+    let body;
+    if (me.id === q.target) {
+      body = '<p>C\'est toi la cible : tu n\'as pas à répondre, les autres te notent.</p>';
+    } else if (done) {
+      body = '<p>Réponse envoyée. En attente des autres…</p>';
+    } else if (kind === 'vote') {
+      body = `<p class="muted">Clique sur le joueur que tu désignes (pas toi).</p>
+        <div class="picks">${ids.filter(id => id !== me.id).map(id =>
+          `<button onclick="vote('${id}')">${who(id)}</button>`).join('')}</div>`;
+    } else if (kind === 'rate') {
+      body = `<div class="rate"><input id="${key}" type="range" min="0" max="10" value="5"
+          oninput="this.nextElementSibling.textContent=this.value"><output>5</output></div>
+        <button onclick="submitAnswer(false)">Prêt</button>`;
+    } else if (kind === 'tier') {
+      body = q.items.map((it, i) => `<div class="tierrow"><span>${esc(it)}</span>
+          <select id="${key}-${i}"><option value="">—</option><option>S</option><option>A</option><option>B</option><option>C</option><option>D</option></select></div>`).join('')
+        + '<button onclick="submitAnswer(false)">Prêt</button>';
+    } else if (q.options) {
+      body = q.options.map(o => `<label class="choice"><input type="radio" name="${key}" value="${esc(o)}">${esc(o)}</label>`).join('')
+        + '<button onclick="submitAnswer(false)">Prêt</button>';
+    } else {
+      body = `<textarea id="${key}" placeholder="Ta réponse"></textarea><button onclick="submitAnswer(false)">Prêt</button>`;
+    }
+    return `${header}<div class="card"><b>${esc(questionText(q))}</b>${body}</div>${footer}`;
   }
 
   // Liaison : une réponse à la fois, sans voir les autres
   const q = room.questions[st.q];
-  const author = room.order[st.q][st.k];
+  const author = room.order[st.j][st.k];
   const text = room.answers?.[author]?.[st.q] || '(pas de réponse)';
-  const picks = ids.map(id => `<button onclick="pick('${id}')">${esc(nameOf(id))}</button>`).join('');
+  const picks = ids.map(id => `<button onclick="pick('${id}')">${who(id)}</button>`).join('');
   const body = done
     ? '<p>Ton choix est envoyé. En attente des autres…</p>'
     : `<p class="muted">Qui a écrit cette réponse ?</p><div class="picks">${picks}</div>`;
@@ -444,31 +564,69 @@ function renderGame(st) {
     <h2>Réponse ${st.k + 1} / ${room.P} · question ${st.q + 1}</h2>
     <div class="timer" id="timer"></div>
     <div class="card">
-      <div class="muted">${esc(q.text)}</div>
+      <div class="muted">${esc(questionText(q))}</div>
       <div class="answer big">${esc(text)}</div>
       ${body}
     </div>
     ${footer}`;
 }
 
+function recapOf(q, qi) {
+  const kind = kindOf(q), ids = playerIds();
+  const title = `<b>${esc(questionText(q))}</b>`;
+
+  if (kind === 'text' || kind === 'choice') {
+    const j = linkQs().indexOf(qi);
+    const items = (room.order[j] || []).map(author =>
+      `<div class="answer">${esc(room.answers?.[author]?.[qi] || '(pas de réponse)')} <span class="muted">— ${esc(nameOf(author))}</span></div>`).join('');
+    return `<div class="card">${title}${items}</div>`;
+  }
+
+  if (kind === 'rate') {
+    const vals = ids.filter(id => id !== q.target).map(id => room.answers?.[id]?.[qi]).filter(v => typeof v === 'number');
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+    return `<div class="card">${title}<p>Moyenne : <b>${avg.toFixed(1)} / 10</b> <span class="muted">(${vals.length} note${vals.length > 1 ? 's' : ''})</span></p></div>`;
+  }
+
+  if (kind === 'tier') {
+    const voters = ids.filter(id => id !== q.target && Array.isArray(room.answers?.[id]?.[qi]));
+    const rows = q.items.map((it, i) => {
+      const scores = voters.map(id => TIER_SCORE[room.answers[id][qi][i]] || 2);
+      const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+      return {it, avg};
+    }).sort((a, b) => b.avg - a.avg)
+      .map(r => `<div class="answer"><b>${tierOf(r.avg)}</b> · ${esc(r.it)}</div>`).join('');
+    return `<div class="card">${title}${rows}</div>`;
+  }
+
+  if (kind === 'vote') {
+    const counts = voteCounts(qi);
+    const max = Math.max(0, ...Object.values(counts));
+    const rows = Object.keys(counts).sort((a, b) => counts[b] - counts[a]).map(id => {
+      const cls = counts[id] === max ? 'win' : '';
+      return `<div class="${cls}">${who(id)} — ${counts[id]} vote${counts[id] > 1 ? 's' : ''}</div>
+        <div class="bar" style="width:${Math.round(100 * counts[id] / Math.max(1, ids.length))}%"></div>`;
+    }).join('');
+    return `<div class="card">${title}${rows || '<p class="muted">Aucun vote.</p>'}</div>`;
+  }
+  return '';
+}
+
 function renderReveal() {
   const ids = playerIds(), s = computeScores();
   const rows = ids
-    .map(id => ({id, ...s[id], total: s[id].pts + s[id].bonus}))
+    .map(id => ({id, ...s[id], total: s[id].links + s[id].bonus + s[id].vote}))
     .sort((a, b) => b.total - a.total)
-    .map(r => `<tr><td>${esc(nameOf(r.id))}${r.id === me.id ? ' (toi)' : ''}</td><td>${r.pts}</td><td>${r.bonus}</td><td><b>${r.total}</b></td></tr>`)
+    .map(r => `<tr><td>${who(r.id)}${r.id === me.id ? ' <span class="muted">(toi)</span>' : ''}</td>
+      <td>${r.links}</td><td>${r.bonus}</td><td>${r.vote}</td><td><b>${r.total}</b></td></tr>`)
     .join('');
-  const recap = room.questions.map((q, qi) => {
-    const items = room.order[qi].map(author =>
-      `<div class="answer">${esc(room.answers?.[author]?.[qi] || '(pas de réponse)')} <span class="muted">— ${esc(nameOf(author))}</span></div>`).join('');
-    return `<div class="card"><b>${esc(q.text)}</b>${items}</div>`;
-  }).join('');
+  const recap = room.questions.map((q, qi) => recapOf(q, qi)).join('');
   return `
     <h1>Résultats</h1>
     <div class="card"><table>
-      <tr><th>Joueur</th><th>Points</th><th>Bonus</th><th>Total</th></tr>${rows}
+      <tr><th>Joueur</th><th>Liens</th><th>Bonus</th><th>Votes</th><th>Total</th></tr>${rows}
     </table></div>
-    <h2>Toutes les réponses</h2>
+    <h2>Toutes les questions</h2>
     ${recap}
     ${isHost() ? '<button onclick="replay()">Rejouer dans cette salle</button>' : ''}
     <button class="secondary" onclick="leave()">Quitter</button>`;
