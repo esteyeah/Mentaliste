@@ -99,7 +99,45 @@ const BANK = [
   {text: "Classe ces jeux de société, du meilleur au pire.", type: "tier", items: ["Monopoly", "Uno", "Loup-garou", "Time's up", "Échecs"]},
   {text: "Qui trouves-tu le plus radin parmi les joueurs ?", type: "vote"},
   {text: "Qui a le plus de chances de devenir célèbre ?", type: "vote"},
-  {text: "Qui survivrait le mieux sur une île déserte ?", type: "vote"}
+  {text: "Qui survivrait le mieux sur une île déserte ?", type: "vote"},
+
+  // --- Questions ouvertes en plus
+  {text: "Quel est ton plus grand talent caché ?"},
+  {text: "Quelle est la dernière chose que tu as cherchée sur internet en secret ?"},
+  {text: "Quel est ton souvenir d'enfance le plus marquant ?"},
+  {text: "Qu'est-ce que tu ferais avec un million d'euros le premier jour ?"},
+  {text: "Quelle est la phrase que tu dis le plus souvent ?"},
+  {text: "Quel métier aurais-tu fait si tu n'avais pas celui-ci ?"},
+  {text: "Quel est l'endroit le plus étrange où tu as dormi ?"},
+  {text: "Quel animal serais-tu, et pourquoi ?"},
+
+  // --- Choix A ou B en plus
+  {text: "Plutôt chat ou chien ?", options: ["Chat", "Chien"]},
+  {text: "Plutôt été ou hiver ?", options: ["Été", "Hiver"]},
+  {text: "Plutôt café ou thé ?", options: ["Café", "Thé"]},
+  {text: "Plutôt film ou série ?", options: ["Film", "Série"]},
+  {text: "Plutôt lever tôt ou se coucher tard ?", options: ["Lever tôt", "Coucher tard"]},
+
+  // --- Notes sur 10 en plus
+  {text: "Note ta semaine, sur 10.", type: "rate"},
+  {text: "Note ton niveau de forme aujourd'hui, sur 10.", type: "rate"},
+  {text: "Note ton dernier repas, sur 10.", type: "rate"},
+  {text: "À combien notes-tu la motivation de {cible} aujourd'hui, sur 10 ?", type: "rate", pseudo: true},
+  {text: "À combien notes-tu le sourire de {cible}, sur 10 ?", type: "rate", pseudo: true},
+
+  // --- Tierlists en plus
+  {text: "Classe ces films, du meilleur au pire.", type: "tier", items: ["Titanic", "Shrek", "Harry Potter", "Le Roi lion", "Star Wars"]},
+  {text: "Classe ces sports, du plus fun au plus nul.", type: "tier", items: ["Football", "Natation", "Tennis", "Badminton", "Cyclisme"]},
+  {text: "Classe ces desserts, du meilleur au pire.", type: "tier", items: ["Crêpe", "Tarte aux pommes", "Glace", "Mousse au chocolat", "Flan"]},
+  {text: "Classe ces activités de vacances.", type: "tier", items: ["Plage", "Montagne", "Parc d'attractions", "Musée", "Camping"]},
+
+  // --- Questions interactives en plus
+  {text: "Qui serait le plus susceptible de se perdre dans une ville ?", type: "vote"},
+  {text: "Qui rirait le plus fort à une blague nulle ?", type: "vote"},
+  {text: "Qui parlerait le plus pendant un repas ?", type: "vote"},
+  {text: "Qui aurait le plus de chances de gagner au loto ?", type: "vote"},
+  {text: "Qui ferait le meilleur présentateur de télé ?", type: "vote"},
+  {text: "Qui oublierait son téléphone en vacances ?", type: "vote"}
 ];
 
 // Types de questions proposés à l'hôte (cochés par défaut)
@@ -114,9 +152,10 @@ const KIND_LABELS = {
 function selectedKinds() {
   return ALL_KINDS.filter(k => { const v = drafts['type-' + k]; return v === undefined || v === '1'; });
 }
+// Questions de la banque + questions ajoutées à la main par l'hôte
 function bankPool() {
   const ks = selectedKinds();
-  return BANK.filter(q => ks.includes(kindOf(q)));
+  return [...BANK, ...Object.values(room?.custom || {})].filter(q => ks.includes(kindOf(q)));
 }
 
 // ---------------------------------------------------------------
@@ -287,6 +326,59 @@ async function joinRoom() {
 // ---------------------------------------------------------------
 // Actions de l'hôte
 // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// Questions ajoutées à la main par l'hôte
+// ---------------------------------------------------------------
+function splitList(s) { return String(s || '').split(';').map(x => x.trim()).filter(Boolean); }
+
+function customCard() {
+  if (!isHost()) return '';
+  const items = Object.entries(room.custom || {}).map(([id, q]) =>
+    `<li>${esc(q.text)} <span class="muted">(${esc(KIND_LABELS[kindOf(q)] || 'texte')})</span>
+      <button class="secondary" style="width:auto;padding:4px 10px" onclick="removeCustom('${id}')">Supprimer</button></li>`).join('');
+  return `
+    <div class="card">
+      <h2>Tes questions</h2>
+      <select id="cq-type">${ALL_KINDS.map(k => `<option value="${k}">${esc(KIND_LABELS[k])}</option>`).join('')}</select>
+      <input id="cq-text" type="text" placeholder="Ta question (pour une note de pseudo, écris {cible})">
+      <input id="cq-opts" type="text" placeholder="Choix A ou B : Pizza ; Sushi">
+      <input id="cq-items" type="text" placeholder="Éléments de la tierlist : Pizza ; Tacos ; Sushi">
+      <button onclick="addCustom()">Ajouter la question</button>
+      ${items ? `<ul>${items}</ul>` : '<p class="muted">Aucune question ajoutée pour l\'instant.</p>'}
+    </div>`;
+}
+
+async function addCustom() {
+  const type = document.getElementById('cq-type').value;
+  const text = (document.getElementById('cq-text').value || '').trim();
+  if (!text) return alert('Écris la question.');
+  const q = {text};
+  if (type === 'choice') {
+    const o = splitList(document.getElementById('cq-opts').value);
+    if (o.length !== 2) return alert('Donne exactement 2 choix, séparés par ;');
+    q.options = o;
+  } else if (type === 'tier') {
+    const it = splitList(document.getElementById('cq-items').value);
+    if (it.length < 2) return alert('Donne au moins 2 éléments, séparés par ;');
+    q.type = 'tier'; q.items = it;
+  } else if (type === 'rate') {
+    q.type = 'rate';
+    if (text.includes('{cible}')) q.pseudo = true;
+  } else if (type === 'vote') {
+    q.type = 'vote';
+  }
+  await roomRef.child('custom').push(q);
+  ['cq-text', 'cq-opts', 'cq-items'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+    drafts[id] = '';
+  });
+}
+
+async function removeCustom(id) {
+  await roomRef.child('custom/' + id).remove();
+}
+
 async function startGame() {
   const ids = playerIds();
   if (ids.length < MIN_PLAYERS) return alert(`Il faut au moins ${MIN_PLAYERS} joueurs.`);
@@ -532,8 +624,8 @@ function renderLobby() {
   const hostPart = isHost() ? `
     <p class="muted">Types de questions à inclure :</p>
     ${boxes}
-    <label class="muted">Nombre de questions (1 à ${BANK.length})</label>
-    <input id="count" type="number" min="1" max="${BANK.length}" value="${room.count || 5}">
+    <label class="muted">Nombre de questions (1 à ${bankPool().length})</label>
+    <input id="count" type="number" min="1" max="${bankPool().length}" value="${room.count || 5}">
     <button onclick="startGame()" ${enough ? '' : 'disabled'}>Lancer la partie (${ids.length} joueur${ids.length > 1 ? 's' : ''})</button>
     ${enough ? '' : `<p class="muted">Il faut au moins ${MIN_PLAYERS} joueurs.</p>`}`
     : '<p class="muted">En attente que l\'hôte lance la partie…</p>';
@@ -541,6 +633,7 @@ function renderLobby() {
     <h1>Salle</h1>
     <div class="card"><p class="muted">Code à partager :</p><div class="code">${esc(roomCode)}</div></div>
     <div class="card"><ul style="list-style:none;padding:0">${list}</ul>${hostPart}</div>
+    ${customCard()}
     <button class="secondary" onclick="leave()">Quitter la salle</button>`;
 }
 
