@@ -67,7 +67,7 @@ const MAX_PLAYERS = 12;
 const ANSWER_SECONDS = 45;   // temps pour répondre à une question
 const LINK_SECONDS = 20;     // temps pour relier une réponse
 const FAST_SECONDS = 3;      // délai restant une fois que tout le monde est prêt
-const VOTE_POINTS = 2;       // points pour le ou les joueurs les plus désignés
+const VOTE_POINTS = 1;       // points pour chaque joueur ayant voté pour un des plus désignés
 
 // Types de questions :
 //  (sans type)  texte libre, à relier
@@ -349,7 +349,7 @@ async function vote(targetId) {
   if (!room || room.phase !== 'game') return;
   const st = stepOf(room);
   if (st.type !== 'answer' || kindOf(room.questions[st.q]) !== 'vote') return;
-  if (room.ready?.[st.n]?.[me.id] || targetId === me.id) return;
+  if (room.ready?.[st.n]?.[me.id]) return;
   await roomRef.update({[`answers/${me.id}/${st.q}`]: targetId, [`ready/${st.n}/${me.id}`]: true});
 }
 
@@ -391,7 +391,7 @@ function tick() {
 // Scores
 //  Liens   : +1 par bonne association (0 si on relie sa propre réponse)
 //  Bonus   : +2 si toutes les réponses d'une question sont bien reliées
-//  Votes   : +2 pour le ou les joueurs les plus désignés (égalité : tous ceux à égalité)
+//  Votes   : +1 pour chaque joueur ayant voté pour un des plus désignés (soi-même compris)
 // Les votes restent anonymes : on affiche seulement le total par joueur.
 // ---------------------------------------------------------------
 function computeScores() {
@@ -413,7 +413,11 @@ function computeScores() {
     if (kindOf(q) !== 'vote') return;
     const counts = voteCounts(qi);
     const max = Math.max(0, ...Object.values(counts));
-    if (max > 0) Object.keys(counts).forEach(t => { if (counts[t] === max && s[t]) s[t].vote += VOTE_POINTS; });
+    if (max === 0) return;
+    playerIds().forEach(p => {
+      const t = room.answers?.[p]?.[qi];
+      if (t && counts[t] === max) s[p].vote += VOTE_POINTS;
+    });
   });
   return s;
 }
@@ -532,8 +536,8 @@ function renderGame(st) {
     } else if (done) {
       body = '<p>Réponse envoyée. En attente des autres…</p>';
     } else if (kind === 'vote') {
-      body = `<p class="muted">Clique sur le joueur que tu désignes (pas toi).</p>
-        <div class="picks">${ids.filter(id => id !== me.id).map(id =>
+      body = `<p class="muted">Clique sur le joueur que tu désignes (toi aussi, si tu te désignes).</p>
+        <div class="picks">${ids.map(id =>
           `<button onclick="vote('${id}')">${who(id)}</button>`).join('')}</div>`;
     } else if (kind === 'rate') {
       body = `<div class="rate"><input id="${key}" type="range" min="0" max="10" value="5"
