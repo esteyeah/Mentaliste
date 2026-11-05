@@ -10,7 +10,7 @@
   h2{font-size:1.2rem;margin:12px 0 4px}
   .card{background:#fff;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)}
   input,textarea,select{width:100%;box-sizing:border-box;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:8px;margin:4px 0}
-  input[type=radio]{width:auto;margin-right:6px}
+  input[type=radio],input[type=checkbox]{width:auto;margin-right:6px}
   input[type=range]{width:calc(100% - 50px)}
   textarea{min-height:70px}
   button{padding:12px 18px;font-size:1rem;border:0;border-radius:8px;background:#6c4cf1;color:#fff;cursor:pointer;margin:6px 0;width:100%}
@@ -101,6 +101,23 @@ const BANK = [
   {text: "Qui a le plus de chances de devenir célèbre ?", type: "vote"},
   {text: "Qui survivrait le mieux sur une île déserte ?", type: "vote"}
 ];
+
+// Types de questions proposés à l'hôte (cochés par défaut)
+const ALL_KINDS = ['text', 'choice', 'rate', 'tier', 'vote'];
+const KIND_LABELS = {
+  text: 'Questions ouvertes (à relier)',
+  choice: 'Choix A ou B (à relier)',
+  rate: 'Notes sur 10',
+  tier: 'Tierlist (classement S à D)',
+  vote: 'Questions interactives (désigner un joueur)'
+};
+function selectedKinds() {
+  return ALL_KINDS.filter(k => { const v = drafts['type-' + k]; return v === undefined || v === '1'; });
+}
+function bankPool() {
+  const ks = selectedKinds();
+  return BANK.filter(q => ks.includes(kindOf(q)));
+}
 
 // ---------------------------------------------------------------
 // Avatars (un par joueur, attribué à l'arrivée dans la salle)
@@ -273,9 +290,11 @@ async function joinRoom() {
 async function startGame() {
   const ids = playerIds();
   if (ids.length < MIN_PLAYERS) return alert(`Il faut au moins ${MIN_PLAYERS} joueurs.`);
+  const pool = bankPool();
+  if (!pool.length) return alert('Coche au moins un type de question.');
   const raw = parseInt(document.getElementById('count')?.value, 10);
-  const N = Math.min(Math.max(raw || 5, 3), BANK.length);
-  const questions = shuffle(BANK).slice(0, N).map(q => {
+  const N = Math.min(Math.max(raw || 5, 1), pool.length);
+  const questions = shuffle(pool).slice(0, N).map(q => {
     const c = {...q};
     if (q.pseudo) c.target = shuffle(ids)[0];
     return c;
@@ -441,12 +460,14 @@ function saveDrafts() {
   document.querySelectorAll('textarea, select, input[type=text], input[type=number], input[type=range]').forEach(el => {
     if (el.id) drafts[el.id] = el.value;
   });
+  document.querySelectorAll('input[type=checkbox]').forEach(el => { if (el.id) drafts[el.id] = el.checked ? '1' : '0'; });
   document.querySelectorAll('input[type=radio]:checked').forEach(el => { drafts[el.name] = el.value; });
 }
 
 function restoreDrafts() {
   Object.entries(drafts).forEach(([key, val]) => {
     const el = document.getElementById(key);
+    if (el && el.type === 'checkbox') { el.checked = val === '1'; return; }
     if (el && el.type !== 'radio') {
       el.value = val;
       if (el.type === 'range' && el.nextElementSibling) el.nextElementSibling.textContent = val;
@@ -456,9 +477,10 @@ function restoreDrafts() {
   });
 }
 
-document.addEventListener('input', e => { if (e.target.id) drafts[e.target.id] = e.target.value; });
+document.addEventListener('input', e => { if (e.target.id && e.target.type !== 'checkbox') drafts[e.target.id] = e.target.value; });
 document.addEventListener('change', e => {
-  if (e.target.type === 'radio') drafts[e.target.name] = e.target.value;
+  if (e.target.type === 'checkbox') drafts[e.target.id] = e.target.checked ? '1' : '0';
+  else if (e.target.type === 'radio') drafts[e.target.name] = e.target.value;
   else if (e.target.id) drafts[e.target.id] = e.target.value;
 });
 
@@ -505,9 +527,13 @@ function renderLobby() {
   const list = ids.map(id =>
     `<li>${who(id)}${id === room.host ? ' <span class="muted">(hôte)</span>' : ''}${id === me.id ? ' <span class="muted">— toi</span>' : ''}</li>`).join('');
   const enough = ids.length >= MIN_PLAYERS;
+  const kinds = selectedKinds();
+  const boxes = ALL_KINDS.map(k => `<label class="choice"><input type="checkbox" id="type-${k}" ${kinds.includes(k) ? 'checked' : ''}>${KIND_LABELS[k]}</label>`).join('');
   const hostPart = isHost() ? `
-    <label class="muted">Nombre de questions (3 à ${BANK.length})</label>
-    <input id="count" type="number" min="3" max="${BANK.length}" value="${room.count || 5}">
+    <p class="muted">Types de questions à inclure :</p>
+    ${boxes}
+    <label class="muted">Nombre de questions (1 à ${BANK.length})</label>
+    <input id="count" type="number" min="1" max="${BANK.length}" value="${room.count || 5}">
     <button onclick="startGame()" ${enough ? '' : 'disabled'}>Lancer la partie (${ids.length} joueur${ids.length > 1 ? 's' : ''})</button>
     ${enough ? '' : `<p class="muted">Il faut au moins ${MIN_PLAYERS} joueurs.</p>`}`
     : '<p class="muted">En attente que l\'hôte lance la partie…</p>';
